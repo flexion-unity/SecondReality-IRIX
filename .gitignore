@@ -1,0 +1,10 @@
+*.user
+*.aps
+.vs
+_Intermediate
+_Builds
+*.args.json
+/*.exe
+.vscode/*
+lib/*
+core
