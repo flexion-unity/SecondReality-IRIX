@@ -2,22 +2,6 @@
 
 #include <stdlib.h>
 
-#ifdef _WIN32
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
-#include <windows.h>
-
-#include <mmsystem.h>
-
-#else
-
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-#endif // __EMSCRIPTEN__
-
 #include <SDL.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -163,17 +147,6 @@ struct WASM_WaveOut
     }
 };
 
-#endif // _WIN32
-
-#ifdef __EMSCRIPTEN__
-// clang-format off
-EM_JS(int, is_firefox, (), {
-  const ua = navigator.userAgent || "";
-  return /Firefox|FxiOS/i.test(ua) ? 1 : 0;
-});
-// clang-format on
-#endif // __EMSCRIPTEN__
-
 #define MIX_BUF_NUM 2
 
 namespace AudioPlayer
@@ -189,10 +162,6 @@ namespace AudioPlayer
         int16_t * mixBuffer[MIX_BUF_NUM]{};
         WAVEHDR waveBlocks[MIX_BUF_NUM]{};
         HWAVEOUT hWave{};
-
-#ifdef _WIN32
-        HANDLE hThread{}, hAudioSem{};
-#endif // _WIN32
     }
 
     static void CALLBACK waveProc(HWAVEOUT hWaveOut, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2)
@@ -202,37 +171,7 @@ namespace AudioPlayer
         (void)dwInstance;
         (void)dwParam1;
         (void)dwParam2;
-
-#ifdef _WIN32
-        if (uMsg == WOM_DONE) ReleaseSemaphore(hAudioSem, 1, nullptr);
-#endif // _WIN32
     }
-
-#ifdef _WIN32
-    static DWORD WINAPI mixThread(LPVOID lpParam)
-    {
-        WAVEHDR * waveBlock;
-
-        (void)lpParam;
-
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-
-        while (audioRunningFlag)
-        {
-            waveBlock = &waveBlocks[currBuffer];
-
-            st3play::FillAudioBuffer((int16_t *)waveBlock->lpData, MIX_BUF_SAMPLES);
-
-            waveOutWrite(hWave, waveBlock, sizeof(WAVEHDR));
-            currBuffer = (currBuffer + 1) % MIX_BUF_NUM;
-
-            // wait for buffer fill request
-            WaitForSingleObject(hAudioSem, INFINITE);
-        }
-
-        return 0;
-    }
-#else
 
     static SDL_AudioFormat wasm_pick_sdl_format(const WAVEFORMATEX * wfx)
     {
@@ -383,15 +322,11 @@ namespace AudioPlayer
         return MMSYSERR_NOERROR;
     }
 
-#ifdef __EMSCRIPTEN__
-    EM_ASYNC_JS(void, wait_next_raf, (), { await new Promise(requestAnimationFrame); });
-#endif // __EMSCRIPTEN__
 
-#endif // _WIN32
 
     void Update([[maybe_unused]] bool yield)
     {
-#ifndef _WIN32
+
         if (!audioRunningFlag || hWave == nullptr) return;
 
         if (static bool primed = false; !primed)
@@ -423,23 +358,12 @@ namespace AudioPlayer
             queuedFrames += MIX_BUF_SAMPLES;
             g_totalSampleCount += MIX_BUF_SAMPLES;
         }
-#endif //_WIN32
-
-#ifdef __EMSCRIPTEN__
-        static double lastPresent = 0.0;
-        static double frameMS = 1000.0 / 60.0;
-        static bool isFirefox = is_firefox();
 
         if (yield)
         {
-            emscripten_sleep(0);
+            SDL_Delay(1); // prevent 100% CPU usage when waiting
         }
-        else if (double now = emscripten_get_now(); isFirefox && (now - lastPresent >= frameMS))
-        {
-            lastPresent = now;
-            wait_next_raf();
-        }
-#endif // __EMSCRIPTEN__
+
     }
 
     bool openMixer(uint32_t audioFreq, int32_t & samplesLeft, uint32_t & totalSampleCount)
@@ -468,11 +392,6 @@ namespace AudioPlayer
 
         if (waveOutOpen(&hWave, WAVE_MAPPER, &wfx, (DWORD_PTR)&waveProc, 0, CALLBACK_FUNCTION) != MMSYSERR_NOERROR) goto omError;
 
-#ifdef _WIN32
-        // create semaphore for buffer fill requests
-        if (hAudioSem = CreateSemaphore(nullptr, MIX_BUF_NUM - 1, MIX_BUF_NUM, nullptr); hAudioSem == nullptr) goto omError;
-#endif // _WIN32
-
         // allocate WinMM mix buffers
         for (i = 0; i < MIX_BUF_NUM; i++)
         {
@@ -493,12 +412,6 @@ namespace AudioPlayer
 
         // create main mixer thread
         audioRunningFlag = true;
-
-#ifdef _WIN32
-        DWORD threadID;
-        if (hThread = CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)mixThread, nullptr, 0, &threadID); hThread == nullptr) goto omError;
-#endif // _WIN32
-
         return true;
 
     omError:
@@ -511,23 +424,6 @@ namespace AudioPlayer
         int32_t i;
 
         audioRunningFlag = false; // make thread end when it's done
-
-#ifdef _WIN32
-        if (hAudioSem != nullptr) ReleaseSemaphore(hAudioSem, 1, nullptr);
-
-        if (hThread != nullptr)
-        {
-            WaitForSingleObject(hThread, INFINITE);
-            CloseHandle(hThread);
-            hThread = nullptr;
-        }
-
-        if (hAudioSem != nullptr)
-        {
-            CloseHandle(hAudioSem);
-            hAudioSem = nullptr;
-        }
-#endif // _WIN32
 
         if (hWave != nullptr)
         {
